@@ -27,6 +27,7 @@ class BINS:
         self.theta = np.deg2rad(theta)
         self.gamma = np.deg2rad(gamma)
         self.phi = np.deg2rad(56)
+        self.lambd = np.deg2rad(0)
         self.dab = np.array([dabx * 10 ** -3 * g, daby * 10 ** -3 * g, 0])
         self.dwb = np.array([np.deg2rad(dwbx) / 3600, np.deg2rad(dwby) / 3600, 0])
         self.sigma_a, self.sigma_w = sigma_a * 10 ** -3 * g, np.deg2rad(sigma_w)
@@ -88,10 +89,33 @@ class BINS:
         c_bo = self.real_vistavka()
         a_b, _ = self.get_measurement("accel")
         w_b, _ = self.get_measurement("gyro")
+        v = self.v
+        phi = self.phi
+        lambd = self.lambd
+        errors = np.array([])
         for i in range(self.N):
             a_o = c_bo * a_b[:, i]
-            
-        pass
+            u_o = self.to_cososym(np.array(0, U * np.cos(phi), U * np.sin(phi)))
+            omega_O = self.to_cososym((1 / R) * np.array(-1, 1, np.tan(phi)) * v)
+            v = v + self.dT * (a_o + (2 * u_o + omega_O) @ v + np.array([0, 0, -g]))
+            w_o = self.to_cososym(
+                (1 / R) * np.array(-1, 1, np.tan(phi)) * v + np.array(0, U * np.cos(phi), U * np.sin(phi)))
+            w_b_m = self.to_cososym(w_b[:, i])
+            c_bo = c_bo + self.dT * (w_o @ c_bo - c_bo @ w_b_m)
+            phi += self.dT * v[1] / R
+            lambd += self.dT * v[0] / (R * np.cos(phi))
+            psi = np.arctan(c_bo[0, 1] / c_bo[1, 1])
+            gamma = -np.arctan(c_bo[2, 0] / c_bo[2, 2])
+            theta = np.arctan(c_bo[2, 1] / np.sqrt(c_bo[2, 0] ** 2 + c_bo[2, 2] ** 2))
+            psi_err, gamma_err, theta_err = psi - self.psi, gamma - self.gamma, theta - self.theta
+            np.append(errors, np.array([psi_err, gamma_err, theta_err, lambd, phi, psi, v[0], v[1], v[2]]))
+        return errors
+
+    @staticmethod
+    def to_cososym(vect):
+        return np.array([[0, vect[2], -vect[1]],
+                         [-vect[1], 0, vect[0]],
+                         [vect[1], -vect[0], 0]])
 
     @staticmethod
     def plot_acf(data):
