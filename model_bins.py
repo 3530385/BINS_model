@@ -3,6 +3,7 @@ import numpy as np
 import statsmodels.api as sm
 import seaborn as sns
 from tqdm import tqdm
+
 sns.set_theme(style="darkgrid")
 
 R = 6371302
@@ -15,10 +16,10 @@ class BINS:
     def __init__(self, psi, theta, gamma, dpsi,
                  dwbx, dwby, dabx, daby,
                  sigma_a, Tka, sigma_w, Tkw,
-                 rand=True, t=84*60, dT=.5):
+                 rand=True, t=91 * 60, dT=.1):
         self.t = t  # время работы
         self.dT = dT  # шаг интегрирования
-        self.N = round(self.t / self.dT)
+        self.N = round(1.5 * 60 * 60 / self.dT)
         self.random_proc = rand
         # self.k = число шагов
         self.v = np.array([0, 0, 0])
@@ -53,11 +54,13 @@ class BINS:
     def ideal_vistavka(self):
         return self.get_mnk(self.gamma, self.psi, self.theta)
 
-    def real_vistavka(self):
-        _, mean_a = self.get_measurement("accel")
+    def real_vistavka(self, get_measurement=False):
+        acc, mean_a = self.get_measurement("accel")
         theta_align = np.arcsin(mean_a[1] / g)
         gamma_align = -np.arcsin(mean_a[0] / np.sqrt(mean_a[0] ** 2 + mean_a[2] ** 2))
         c_bo_align = self.get_mnk(gamma=gamma_align, psi=self.psi + self.deltapsi, theta=theta_align)
+        if get_measurement:
+            return acc, c_bo_align
         return c_bo_align
 
     def get_measurement(self, sensor="accel"):
@@ -80,15 +83,15 @@ class BINS:
             return ab, ab.mean(axis=1)
         norm_noise = np.random.normal(size=(3, self.N)) * sigma * np.sqrt(2 * beta * self.dT)
         filtered_noise = np.zeros((3, self.N))
-        for i in range(1, self.N):
+        for i in tqdm(range(1, self.N)):
             filtered_noise[:, i] = (1 - beta * self.dT) * filtered_noise[:, i - 1] + norm_noise[:, i - 1]
         result = ab + filtered_noise
         return result, result.mean(axis=1)
 
     def navigate_algorythm(self):
-        errors = None
-        c_bo = self.real_vistavka()
-        a_b, _ = self.get_measurement("accel")
+        errors = np.zeros((9, self.N))
+        a_b, c_bo = self.real_vistavka(get_measurement=True)
+        # a_b, _ = self.get_measurement("accel")
         w_b, _ = self.get_measurement("gyro")
         v = self.v
         phi = self.phi
@@ -96,7 +99,7 @@ class BINS:
         for i in tqdm(range(self.N)):
             a_o = c_bo @ a_b[:, i]
             u_o = self.to_cososym(np.array([0, U * np.cos(phi), U * np.sin(phi)]))
-            omega_O = self.to_cososym((1 / R) * np.array([-1, 1, np.tan(phi)]) * v)
+            omega_O = self.to_cososym((1 / R) * np.array([-v[1], v[0], v[0] * np.tan(phi)]))
             v = v + self.dT * (a_o + (2 * u_o + omega_O) @ v + np.array([0, 0, -g]))
             w_o = self.to_cososym(
                 (1 / R) * np.array([-v[1], v[0], v[0] * np.tan(phi)]) + np.array([0, U * np.cos(phi), U * np.sin(phi)]))
@@ -108,17 +111,23 @@ class BINS:
             gamma = -np.arctan(c_bo[2, 0] / c_bo[2, 2])
             theta = np.arctan(c_bo[2, 1] / np.sqrt(c_bo[2, 0] ** 2 + c_bo[2, 2] ** 2))
             psi_err, gamma_err, theta_err = psi - self.psi, gamma - self.gamma, theta - self.theta
-            if errors is not  None:
-                errors = np.hstack(
-                    [errors, np.array([psi_err, gamma_err, theta_err, lambd, phi, psi, v[0], v[1], v[2]]).reshape(-1, 1)])
-            else:
-                errors = np.array([psi_err, gamma_err, theta_err, lambd, phi, psi, v[0], v[1], v[2]]).reshape(-1, 1)
+            current_errors = np.array([np.rad2deg(psi_err) * 60, np.rad2deg(gamma_err) * 60, np.rad2deg(theta_err) * 60,
+                                       np.rad2deg(lambd), np.rad2deg(phi), np.rad2deg(psi),
+                                       v[0], v[1], v[2]])
+            errors[:, i] = current_errors
         return errors
 
+    def theory_errors(self):
+        nu = 1 / (84.4 * 60)
+        err = lambda t: np.array([self.dwb[1] * R * (1 - np.cos(nu * t)),   # dv_ox
+                                 -self.dwb[0] * R * (1 - np.cos(nu * t)),   # dv_oy
+                                 -self.dab[1]/g-self.dwb[0]*np.sin(nu*t)/nu,   # F_ox
+                                 self.dab[0]/g-self.dwb[1]*np.sin(nu*t)/nu,   # F_oy
+                                  ])
     @staticmethod
     def to_cososym(vect):
         return np.array([[0, vect[2], -vect[1]],
-                         [-vect[1], 0, vect[0]],
+                         [-vect[2], 0, vect[0]],
                          [vect[1], -vect[0], 0]])
 
     @staticmethod
@@ -131,9 +140,11 @@ class BINS:
 
 if __name__ == '__main__':
     bins = BINS(psi=90, theta=3, gamma=0,
-                dpsi=-0.5, dwbx=1, dwby=0.5,
-                dabx=1, daby=0.5, sigma_a=1,
-                Tka=0.2, sigma_w=2, Tkw=0.1,
+                dpsi=-0.5, dwbx=0, dwby=0,
+                # dpsi=0, dwbx=0, dwby=0,
+                dabx=1, daby=-0.5, sigma_a=1,
+                # dabx=0, daby=0, sigma_a=1,
+                Tka=0.2, sigma_w=.05, Tkw=0.1,
                 rand=False)
     # a, means = bins.get_measurement("gyro")
     # bins.plot_acf(a[0])
@@ -143,8 +154,17 @@ if __name__ == '__main__':
     # sns.lineplot(a[1])
     # sns.lineplot(a[2])
     # plt.show()
+    y_labeles = ["psi_err", "gamma_err", "theta_err", "lambd", "phi", "psi", "v_x", "v_y", "v_z"]
+    plot_config = {
+        i: {"x_label": "Время моделирования",
+            "y_label": y_labeles[i]}
+        for i in range(9)
+    }
     errors = bins.navigate_algorythm()
     # print(errors)
     for i in range(9):
-        sns.lineplot(errors[i])
+        plt.plot(errors[i])
+        plt.xlabel(plot_config[i]["x_label"])
+        plt.ylabel(plot_config[i]["y_label"])
+        plt.title(plot_config[i]["y_label"])
         plt.show()
