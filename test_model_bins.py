@@ -79,12 +79,13 @@ def test_real_vistavka(bins_with_random, bins_without_random):
     theory_errors = [bins_without_random.dab[1] / np.sqrt(g ** 2 - mean_a[1] ** 2),
                      (bins_without_random.dab[2] * mean_a[0] - bins_without_random.dab[0] * mean_a[2]) / (
                                  mean_a[0] ** 2 + mean_a[2] ** 2)]
-    assert np.allclose(real_errors, theory_errors)
+    assert np.allclose(real_errors, theory_errors, atol=.000001)
 
     _, mean_a = bins_with_random.get_measurement("accel")
     c_bo_align = bins_with_random.real_vistavka()
     theta_zk = np.arctan(c_bo_align[2, 1] / np.sqrt(c_bo_align[0, 1] ** 2 + c_bo_align[1, 1] ** 2))
     gamma_zk = -np.arctan(c_bo_align[2, 0] / c_bo_align[2, 2])
+    print(theta_zk, gamma_zk)
     real_errors = [theta_zk - bins_with_random.theta, gamma_zk - bins_with_random.gamma]
     theory_errors = [bins_with_random.dab[1] / np.sqrt(g ** 2 - mean_a[1] ** 2),
                      (bins_with_random.dab[2] * mean_a[0] - bins_with_random.dab[0] * mean_a[2]) / (

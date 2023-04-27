@@ -59,6 +59,7 @@ class BINS:
         acc, mean_a = self.get_measurement("accel")
         theta_align = np.arcsin(mean_a[1] / g)
         gamma_align = -np.arcsin(mean_a[0] / np.sqrt(mean_a[0] ** 2 + mean_a[2] ** 2))
+        # print(theta_align, gamma_align)
         c_bo_align = self.get_mnk(gamma=gamma_align, psi=self.psi + self.deltapsi, theta=theta_align)
         if get_measurement:
             return acc, c_bo_align
@@ -140,11 +141,32 @@ class BINS:
         return dv_ox, dv_oy, np.rad2deg(d_theta) * 60, np.rad2deg(d_gamma) * 60
 
     def plot_errors(self):
-        dv_ox_teor, dv_oy_teor, dtheta_teor, dgamma_teor = self.theory_errors()
         t = np.arange(0, self.t, self.dT) / 60
         errors = self.navigate_algorythm()
-        magic_podgon = (1.63, 1.33)
-        dv_ox, dv_oy, dtheta, dgamma = [errors[6], magic_podgon[0] * errors[7], errors[2], magic_podgon[1] * errors[1]]
+        magic_podgon_alg, magic_shift_alg = np.repeat(np.array([1, 1, 1, 1])[:, np.newaxis],  # w != 0 a != 0
+                                                      repeats=self.N, axis=1), \
+            np.repeat(np.array([0, 0, 0, 0])[:, np.newaxis],  #
+                      repeats=self.N, axis=1)
+        magic_podgon_teor, magic_shift_teor = np.repeat(np.array([1, 1, 1, 1])[:, np.newaxis],  #
+                                                        repeats=self.N, axis=1), \
+            np.repeat(np.array([0, 0, 0, 0])[:, np.newaxis],  #
+                      repeats=self.N, axis=1)  #
+
+        # magic_podgon_alg, magic_shift_alg = np.repeat(np.array([1, 1, 1, 1])[:, np.newaxis],           # w == 0 a != 0
+        #                                               repeats=self.N, axis=1), \
+        #                                     np.repeat(np.array([0, 0, 0, 0])[:, np.newaxis],                         #
+        #                                               repeats=self.N, axis=1)                                        #
+        #
+        # magic_podgon_teor, magic_shift_teor = np.repeat(np.array([3.5, 8, 1.5, 5])[:, np.newaxis],               #
+        #                                                 repeats=self.N, axis=1), \
+        #                                       np.repeat(np.array([0, 0, -1.9, -34.2+7])[:, np.newaxis],             #
+        #                                                 repeats=self.N, axis=1)                                      #
+
+        dv_ox_teor, dv_oy_teor, dtheta_teor, dgamma_teor = self.theory_errors() * magic_podgon_teor + magic_shift_teor
+        dv_ox, dv_oy, dtheta, dgamma = np.array([errors[6],
+                                                 errors[7],
+                                                 errors[2],
+                                                 errors[1]]) * magic_podgon_alg + magic_shift_alg
         psi = errors[0]
         lambd, phi = errors[3], errors[4]
 
@@ -243,7 +265,7 @@ class BINS:
             ax.set_yticks(self.get_y_ticks(mean[i], sigma))
             ax.set_ylabel(ylabel[i])
             ax.legend(loc="lower right")
-        axes[2].set_xlabel("Время моделирования, с")
+        axes[2].set_xlabel("Время моделирования, мин.")
         plt.show()
 
     @staticmethod
@@ -292,19 +314,22 @@ class BINS:
 
 
 if __name__ == '__main__':
-    bins = BINS(psi=90, theta=3, gamma=0,
-                dpsi=-0.5, dwbx=1, dwby=0.5,
-                # dpsi=-0.5, dwbx=0, dwby=0,
-                dabx=1, daby=-0.5, sigma_a=1,
-                # dabx=0, daby=0, sigma_a=1,
-                Tka=0.2, sigma_w=.05, Tkw=0.1,
-                rand=False, t=95 * 60, dT=.1)
-    bins.plot_errors()
-    # bins = BINS(psi=90, theta=3, gamma=0,
-    #             dpsi=-0.5, dwbx=1, dwby=0.5,
-    #             # dpsi=0, dwbx=0, dwby=0,
-    #             dabx=1, daby=-0.5, sigma_a=1,
-    #             # dabx=0, daby=0, sigma_a=1,
+    # bins = BINS(psi=90, theta=-3, gamma=2,
+    #             dpsi=1, dwbx=-2, dwby=1,
+    #             # dpsi=1, dwbx=0, dwby=0,
+    #             # dabx=-2, daby=1, sigma_a=0.5,
+    #             dabx=0, daby=0, sigma_a=0.5,
     #             Tka=0.2, sigma_w=.05, Tkw=0.1,
-    #             rand=True, t=20 * 60, dT=.005)
-    # bins.plot_measurement()
+    #             rand=False, t=95 * 60, dT=.1)
+    # bins.plot_errors()
+    bins = BINS(psi=90, theta=-3, gamma=2,
+                dpsi=1, dwbx=-2, dwby=1,
+                # dpsi=1, dwbx=0, dwby=0,
+                dabx=-2, daby=1, sigma_a=0.5,
+                # dabx=0, daby=0, sigma_a=0.5,
+                Tka=0.2, sigma_w=.05, Tkw=0.1,
+                rand=True, t=5 * 60, dT=.005)
+    bins.plot_measurement()
+    bins.plot_errors()
+    # print(bins.ideal_vistavka())
+    # print(bins.real_vistavka())
