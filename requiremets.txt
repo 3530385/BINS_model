@@ -1,0 +1,5 @@
+matplotlib
+statsmodels
+seaborn
+tqdm
+
