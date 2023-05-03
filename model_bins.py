@@ -116,7 +116,9 @@ class BINS:
             theta = np.arctan(c_bo[2, 1] / np.sqrt(c_bo[2, 0] ** 2 + c_bo[2, 2] ** 2))
             psi_err, gamma_err, theta_err = psi - self.psi, gamma - self.gamma, theta - self.theta
             current_errors = np.array([np.rad2deg(psi_err) * 60, np.rad2deg(gamma_err) * 60, np.rad2deg(theta_err) * 60,
-                                       np.rad2deg(self.lambd - lambd), np.rad2deg(self.phi - phi), np.rad2deg(psi),
+                                       np.rad2deg(lambd - self.lambd ),
+                                       np.rad2deg(phi - self.phi),
+                                       np.rad2deg(psi),
                                        v[0], v[1], v[2]])
             errors[:, i] = current_errors
         return errors
