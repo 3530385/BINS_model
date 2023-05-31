@@ -17,7 +17,8 @@ class BINS:
     def __init__(self, psi, theta, gamma, dpsi,
                  dwbx, dwby, dabx, daby,
                  sigma_a, Tka, sigma_w, Tkw,
-                 rand=True, t=60 * 60, dT=.005):
+                 rand=True, vel_corr=True, sigma_gnss=0.2,
+                 t=60 * 60, dT=.005, k1=0., k2=0.):
         self.t = t  # время работы
         self.dT = dT  # шаг интегрирования
         self.N = round(self.t / self.dT)
@@ -35,6 +36,14 @@ class BINS:
         self.sigma_a, self.sigma_w = sigma_a * 10 ** -3 * g, np.deg2rad(sigma_w)
         self.Tka, self.Tkw = Tka, Tkw
         self.beta_a, self.beta_w = self.Tka ** -1, self.Tkw ** -1
+        self.vel_corr = vel_corr
+        self.k1 = 0
+        self.k2 = 0
+        if vel_corr:
+            self.sigma_gnss = sigma_gnss
+
+        if rand:
+            np.random.seed(42)
 
     @staticmethod
     def get_mnk(gamma, psi, theta):
@@ -76,6 +85,9 @@ class BINS:
             dv = self.dwb
             sigma = self.sigma_w
             beta = self.beta_w
+        elif sensor == "gnss":
+            return np.random.normal(size=3, scale=self.sigma_gnss).astype(np.float64) if self.random_proc else np.array(
+                [0, 0, 0])
         else:
             raise RuntimeError("sensor must be accel or gyro")
         Cob = self.ideal_vistavka().T
@@ -95,18 +107,32 @@ class BINS:
         a_b, c_bo = self.real_vistavka(get_measurement=True)
         # a_b, _ = self.get_measurement("accel")
         w_b, _ = self.get_measurement("gyro")
-        v = self.v
+        v = self.v.astype(np.float64)
         phi = self.phi
         lambd = self.lambd
         for i in tqdm(range(self.N)):
+            if self.vel_corr and not 10 * 60 < i * self.dT < 15 * 60:
+                self.k1 = 0.097
+                self.k2 = 3305
+            else:
+                self.k1 = 0
+                self.k2 = 0
+
             a_o = c_bo @ a_b[:, i]
             u_o = self.to_cososym(np.array([0, U * np.cos(phi), U * np.sin(phi)]))
             omega_o = self.to_cososym((1 / R) * np.array([-v[1], v[0], v[0] * np.tan(phi)]))
-            v = v + self.dT * (a_o + (2 * u_o + omega_o) @ v + np.array([0, 0, -g]))
+            v_gnss = self.get_measurement("gnss")
+            delta_v = v - v_gnss
+            v += self.dT * (a_o + (2 * u_o + omega_o) @ v + np.array([0, 0, -g]) - self.k1 * delta_v)
+            # v0_new = v[0] + self.dT * (a_o[0] + (U * np.sin(phi) + U * np.sin(phi) + v[0] * np.tan(phi)) * v[1])# - self.k1 * delta_v)
+            # v1_new = v[1] + self.dT * (a_o[1] - (U * np.sin(phi) + U * np.sin(phi) + v[0] * np.tan(phi)) * v[0])# - self.k1 * delta_v)
+            # v[0], v[1] = v0_new, v1_new
             w_o = self.to_cososym(
-                (1 / R) * np.array([-v[1], v[0], v[0] * np.tan(phi)]) + np.array([0, U * np.cos(phi), U * np.sin(phi)]))
+                (1 / R) * np.array([-v[1] * (1 + self.k2), v[0] * (1 + self.k2), v[0] * np.tan(phi)
+                                    ])) + u_o  # - self.k2 / R * delta_v * np.array([-1, 1, 1])) + u_o
             w_b_m = self.to_cososym(w_b[:, i])
             c_bo += self.dT * (w_o @ c_bo - c_bo @ w_b_m)
+            # c_bo += self.dT * (c_bo @ w_b_m - w_o @ c_bo)
             phi += self.dT * v[1] / R
             lambd += self.dT * v[0] / (R * np.cos(phi))
             psi = np.arctan(c_bo[0, 1] / c_bo[1, 1])
@@ -116,7 +142,7 @@ class BINS:
             theta = np.arctan(c_bo[2, 1] / np.sqrt(c_bo[2, 0] ** 2 + c_bo[2, 2] ** 2))
             psi_err, gamma_err, theta_err = psi - self.psi, gamma - self.gamma, theta - self.theta
             current_errors = np.array([np.rad2deg(psi_err) * 60, np.rad2deg(gamma_err) * 60, np.rad2deg(theta_err) * 60,
-                                       np.rad2deg(lambd - self.lambd ),
+                                       np.rad2deg(lambd - self.lambd),
                                        np.rad2deg(phi - self.phi),
                                        np.rad2deg(psi),
                                        v[0], v[1], v[2]])
@@ -142,7 +168,7 @@ class BINS:
         d_gamma = - 1 / np.cos(self.theta) * (F_oy * np.cos(self.psi) + F_ox * np.sin(self.psi))
         return dv_ox, dv_oy, np.rad2deg(d_theta) * 60, np.rad2deg(d_gamma) * 60
 
-    def plot_errors(self):
+    def plot_errors(self, plot_theory=True):
         t = np.arange(0, self.t, self.dT) / 60
         errors = self.navigate_algorythm()
         magic_podgon_alg, magic_shift_alg = np.repeat(np.array([1, 1, 1, 1])[:, np.newaxis],  # w != 0 a != 0
@@ -172,31 +198,53 @@ class BINS:
         psi = errors[0]
         lambd, phi = errors[3], errors[4]
 
-        # Ошибки определения скоростей
-        plt.plot(t, dv_ox_teor, "b--",
-                 t, dv_ox, "b",
-                 t, dv_oy_teor, "g--",
-                 t, dv_oy, "g")
-        plt.legend(["$\Delta V_E $ по формуле", "$\Delta V_E $ в результате работы алгоритма",
-                    "$\Delta V_N $ по формуле", "$\Delta V_N $ в результате работы алгоритма"],
-                   fontsize='x-small')
-        plt.title("Ошибки определения скоростей")
-        plt.xlabel("Время моделирования, мин")
-        plt.ylabel("Ошибка, м/с")
-        plt.show()
+        if plot_theory:
+            # Ошибки определения скоростей
+            plt.plot(t, dv_ox_teor, "b--",
+                     t, dv_ox, "b",
+                     t, dv_oy_teor, "g--",
+                     t, dv_oy, "g")
+            plt.legend(["$\Delta V_E $ по формуле", "$\Delta V_E $ в результате работы алгоритма",
+                        "$\Delta V_N $ по формуле", "$\Delta V_N $ в результате работы алгоритма"],
+                       fontsize='x-small')
+            plt.title("Ошибки определения скоростей")
+            plt.xlabel("Время моделирования, мин")
+            plt.ylabel("Ошибка, м/с")
+            plt.show()
 
-        # Ошибки определения углов ориентации
-        plt.plot(t, dtheta_teor, "b--")
-        plt.plot(t, dtheta, "b")
-        plt.plot(t, dgamma_teor, "g--")
-        plt.plot(t, dgamma, "g")
-        plt.legend(["$\Delta \\theta $ по формуле", "$\Delta \\theta $ в результате работы алгоритма",
-                    "$\Delta \gamma $ по формуле", "$\Delta \gamma $ в результате работы алгоритма"],
-                   fontsize='x-small')
-        plt.title("Ошибки определения углов ориентации")
-        plt.xlabel("Время моделирования, мин")
-        plt.ylabel("Ошибка, угл. мин.")
-        plt.show()
+            # Ошибки определения углов ориентации
+            plt.plot(t, dtheta_teor, "b--")
+            plt.plot(t, dtheta, "b")
+            plt.plot(t, dgamma_teor, "g--")
+            plt.plot(t, dgamma, "g")
+            plt.legend(["$\Delta \\theta $ по формуле", "$\Delta \\theta $ в результате работы алгоритма",
+                        "$\Delta \gamma $ по формуле", "$\Delta \gamma $ в результате работы алгоритма"],
+                       fontsize='x-small')
+            plt.title("Ошибки определения углов ориентации")
+            plt.xlabel("Время моделирования, мин")
+            plt.ylabel("Ошибка, угл. мин.")
+            plt.show()
+        else:
+            plt.plot(t, dv_ox, "b",
+                     t, dv_oy, "g")
+            plt.legend(["$\Delta V_E $ в результате работы алгоритма",
+                        "$\Delta V_N $ в результате работы алгоритма"],
+                       fontsize='x-small')
+            plt.title("Ошибки определения скоростей")
+            plt.xlabel("Время моделирования, мин")
+            plt.ylabel("Ошибка, м/с")
+            plt.show()
+
+            # Ошибки определения углов ориентации
+            plt.plot(t, dtheta, "b")
+            plt.plot(t, dgamma, "g")
+            plt.legend(["$\Delta \\theta $ в результате работы алгоритма",
+                        "$\Delta \gamma $ в результате работы алгоритма"],
+                       fontsize='x-small')
+            plt.title("Ошибки определения углов ориентации")
+            plt.xlabel("Время моделирования, мин")
+            plt.ylabel("Ошибка, угл. мин.")
+            plt.show()
 
         # Ошибка определения угла курса
         plt.plot(t, psi, "b")
@@ -214,6 +262,29 @@ class BINS:
         plt.legend(["$\Delta E $",
                     "$\Delta N $"])
         plt.show()
+
+        if self.vel_corr:
+            nu = np.sqrt(g / R)
+            # dwo = self.ideal_vistavka() @ self.dwb
+            # dao = self.ideal_vistavka() @ self.dab
+            dwo = [self.dwb[0] * np.cos(self.psi) + self.dwb[1] * np.sin(self.psi),
+                   -self.dwb[0] * np.sin(self.psi) + self.dwb[1] * np.cos(self.psi)]
+            dao = [self.dab[0] * np.cos(self.psi) + self.dab[1] * np.sin(self.psi),
+                   -self.dab[0] * np.sin(self.psi) + self.dab[1] * np.cos(self.psi)]
+            dv_corr = 0
+            dvox_form = (dwo[1] * R + self.k2 * dv_corr) / (self.k2 + 1)
+            dvoy_form = (dwo[0] * R + self.k2 * dv_corr) / (self.k2 + 1)
+            Fox = - dao[1] / g - self.k1 * (dwo[0] + dv_corr / R) / ((self.k2 + 1) * nu ** 2)
+            Foy = dao[0] / g - self.k1 * (dwo[1] + dv_corr / R) / ((self.k2 + 1) * nu ** 2)
+            dtheta_form = -Fox * np.cos(self.psi) + Foy * np.sin(self.psi)
+            dtheta_form = np.rad2deg(dtheta_form) * 60
+            dgamma_form = -1 / np.cos(self.theta) * (Foy * np.cos(self.psi) + Fox * np.sin(self.psi))
+            dgamma_form = np.rad2deg(dgamma_form) * 60
+            print(f"{dv_ox[-1]=},         {dvox_form=}")
+            print(f"{dv_oy[-1]=},         {dvoy_form=}")
+            print("-----------")
+            print(f"{dtheta[-1]=},         {dtheta_form=}")
+            print(f"{dgamma[-1]=},         {dgamma_form=}")
 
     def plot_measurement(self):
         ab, mean_a = self.get_measurement("accel")
@@ -319,11 +390,12 @@ if __name__ == '__main__':
     bins = BINS(psi=90, theta=-3, gamma=2,
                 dpsi=1, dwbx=-2, dwby=1,
                 # dpsi=1, dwbx=0, dwby=0,
-                # dabx=-2, daby=1, sigma_a=0.5,
-                dabx=0, daby=0, sigma_a=0.5,
+                dabx=-2, daby=1, sigma_a=0.5,
+                # dabx=0, daby=0, sigma_a=0.5,
                 Tka=0.2, sigma_w=.05, Tkw=0.1,
-                rand=False, t=95 * 60, dT=.1)
-    bins.plot_errors()
+                rand=True, t=95 * 60, dT=.1,
+                vel_corr=True, k1=0.097, k2=3305.25)
+    bins.plot_errors(plot_theory=False)
     # bins = BINS(psi=90, theta=-3, gamma=2,
     #             dpsi=1, dwbx=-2, dwby=1,
     #             # dpsi=1, dwbx=0, dwby=0,
