@@ -7,7 +7,7 @@ import scipy
 
 sns.set_theme(style="darkgrid")
 
-R = 6371302
+R = 6378245
 g = 9.81
 U = np.deg2rad(15) / 3600
 
@@ -37,8 +37,8 @@ class BINS:
         self.Tka, self.Tkw = Tka, Tkw
         self.beta_a, self.beta_w = self.Tka ** -1, self.Tkw ** -1
         self.vel_corr = vel_corr
-        self.k1 = 0
-        self.k2 = 0
+        self.k1 = k1
+        self.k2 = k2
         if vel_corr:
             self.sigma_gnss = sigma_gnss
 
@@ -68,7 +68,6 @@ class BINS:
         acc, mean_a = self.get_measurement("accel")
         theta_align = np.arcsin(mean_a[1] / g)
         gamma_align = -np.arcsin(mean_a[0] / np.sqrt(mean_a[0] ** 2 + mean_a[2] ** 2))
-        # print(theta_align, gamma_align)
         c_bo_align = self.get_mnk(gamma=gamma_align, psi=self.psi + self.deltapsi, theta=theta_align)
         if get_measurement:
             return acc, c_bo_align
@@ -86,7 +85,8 @@ class BINS:
             sigma = self.sigma_w
             beta = self.beta_w
         elif sensor == "gnss":
-            return np.random.normal(size=3, scale=self.sigma_gnss).astype(np.float64) if self.random_proc else np.array(
+            return np.random.normal(size=3, scale=self.sigma_gnss / np.sqrt(self.dT)).astype(
+                np.float64) if self.random_proc else np.array(
                 [0, 0, 0])
         else:
             raise RuntimeError("sensor must be accel or gyro")
@@ -110,26 +110,28 @@ class BINS:
         v = self.v.astype(np.float64)
         phi = self.phi
         lambd = self.lambd
+        delta_v = 0
+        k1, k2 = self.k1, self.k2
         for i in tqdm(range(self.N)):
             if self.vel_corr and not 10 * 60 < i * self.dT < 15 * 60:
-                self.k1 = 0.097
-                self.k2 = 3305
+                k1 = self.k1
+                k2 = self.k2
             else:
-                self.k1 = 0
-                self.k2 = 0
-
+                k1 = 0
+                k2 = 0
             a_o = c_bo @ a_b[:, i]
             u_o = self.to_cososym(np.array([0, U * np.cos(phi), U * np.sin(phi)]))
             omega_o = self.to_cososym((1 / R) * np.array([-v[1], v[0], v[0] * np.tan(phi)]))
-            v_gnss = self.get_measurement("gnss")
-            delta_v = v - v_gnss
-            v += self.dT * (a_o + (2 * u_o + omega_o) @ v + np.array([0, 0, -g]) - self.k1 * delta_v)
-            # v0_new = v[0] + self.dT * (a_o[0] + (U * np.sin(phi) + U * np.sin(phi) + v[0] * np.tan(phi)) * v[1])# - self.k1 * delta_v)
-            # v1_new = v[1] + self.dT * (a_o[1] - (U * np.sin(phi) + U * np.sin(phi) + v[0] * np.tan(phi)) * v[0])# - self.k1 * delta_v)
+            if self.vel_corr:
+                v_gnss = self.get_measurement("gnss")
+                delta_v = v - v_gnss
+            v += self.dT * (a_o + (2 * u_o + omega_o) @ v + np.array([0, 0, -g]) - k1 * delta_v)
+            # v0_new = v[0] + self.dT * (a_o[0] + (U * np.sin(phi) + U * np.sin(phi) + v[0] * np.tan(phi)) * v[1])# - k1 * delta_v)
+            # v1_new = v[1] + self.dT * (a_o[1] - (U * np.sin(phi) + U * np.sin(phi) + v[0] * np.tan(phi)) * v[0])# - k1 * delta_v)
             # v[0], v[1] = v0_new, v1_new
             w_o = self.to_cososym(
-                (1 / R) * np.array([-v[1] * (1 + self.k2), v[0] * (1 + self.k2), v[0] * np.tan(phi)
-                                    ])) + u_o  # - self.k2 / R * delta_v * np.array([-1, 1, 1])) + u_o
+                (1 / R) * np.array([-v[1] * (1 + k2), v[0] * (1 + k2), v[0] * np.tan(phi)
+                                    ])) + u_o  # - k2 / R * delta_v * np.array([-1, 1, 1])) + u_o
             w_b_m = self.to_cososym(w_b[:, i])
             c_bo += self.dT * (w_o @ c_bo - c_bo @ w_b_m)
             # c_bo += self.dT * (c_bo @ w_b_m - w_o @ c_bo)
@@ -273,18 +275,24 @@ class BINS:
                    -self.dab[0] * np.sin(self.psi) + self.dab[1] * np.cos(self.psi)]
             dv_corr = 0
             dvox_form = (dwo[1] * R + self.k2 * dv_corr) / (self.k2 + 1)
-            dvoy_form = (dwo[0] * R + self.k2 * dv_corr) / (self.k2 + 1)
+            dvoy_form = (-dwo[0] * R + self.k2 * dv_corr) / (self.k2 + 1)
             Fox = - dao[1] / g - self.k1 * (dwo[0] + dv_corr / R) / ((self.k2 + 1) * nu ** 2)
             Foy = dao[0] / g - self.k1 * (dwo[1] + dv_corr / R) / ((self.k2 + 1) * nu ** 2)
             dtheta_form = -Fox * np.cos(self.psi) + Foy * np.sin(self.psi)
             dtheta_form = np.rad2deg(dtheta_form) * 60
             dgamma_form = -1 / np.cos(self.theta) * (Foy * np.cos(self.psi) + Fox * np.sin(self.psi))
             dgamma_form = np.rad2deg(dgamma_form) * 60
-            print(f"{dv_ox[-1]=},         {dvox_form=}")
-            print(f"{dv_oy[-1]=},         {dvoy_form=}")
-            print("-----------")
-            print(f"{dtheta[-1]=},         {dtheta_form=}")
-            print(f"{dgamma[-1]=},         {dgamma_form=}")
+            from_minute = 40
+            idx_start = int(from_minute * 60 / params["dT"])
+            print(f'''Величины обобщенных дрейфов:\n
+            {dwo=} \n
+            -----------\n
+            Установившиеся ошибки по скорости
+            {np.mean(dv_ox[idx_start:])=},\t{dvox_form=}\n
+            {np.mean(dv_oy[idx_start:])=},\t{dvoy_form=}\n
+            -----------\n
+            {np.mean(dtheta[idx_start:])=},\t{dtheta_form=}\n
+            {np.mean(dgamma[idx_start:])=},\t{dgamma_form=}''')
 
     def plot_measurement(self):
         ab, mean_a = self.get_measurement("accel")
@@ -385,16 +393,50 @@ class BINS:
         nsd.legend(["СП по смоделированным\n измерениям", "СП по формуле"])
         plt.show()
 
+    @staticmethod
+    def find_ts(ts_list: list, xi: float = 1, from_minute=35):
+        result = []
+        nu = np.sqrt(g / R)
+        for ts in ts_list:
+            ws = 2 * np.pi / ts
+            k1 = 2 * xi * ws
+            k2 = ws ** 2 / nu ** 2 - 1
+            params["k1"] = k1
+            params["k2"] = k2
+            bins_k12 = BINS(**params)
+            errors = bins_k12.navigate_algorythm()
+            (psi, lambd, phi, dv_ox,
+             dv_oy, dtheta, dgamma) = np.array([errors[0], errors[3], errors[4], errors[6],
+                                                errors[7], errors[2], errors[1]])
+            idx_start = int(from_minute * 60 / params["dT"])
+            result.append({"dtheta": np.std(dtheta[idx_start:]),
+                           "dgamma": np.std(dgamma[idx_start:]),
+                           "dv_ox": np.std(dv_ox[idx_start:]),
+                           "dv_oy": np.std(dv_oy[idx_start:]),
+                           "k1": k1, "k2": k2, "ts": ts})
+        plt.plot(dgamma)
+        plt.show()
+        return result
+
+
+params = dict(psi=90, theta=-3, gamma=2,
+              dpsi=1, dwbx=-2, dwby=1,
+              # dpsi=1, dwbx=0, dwby=0,
+              dabx=-2, daby=1, sigma_a=0.5,
+              # dabx=0, daby=0, sigma_a=0.5,
+              Tka=0.2, sigma_w=.05, Tkw=0.1,
+              rand=True, t=90 * 60, dT=.1,
+              vel_corr=True, k1=0.251327412287184,
+              k2=10266.1975409951,
+              sigma_gnss=0.2)
 
 if __name__ == '__main__':
-    bins = BINS(psi=90, theta=-3, gamma=2,
-                dpsi=1, dwbx=-2, dwby=1,
-                # dpsi=1, dwbx=0, dwby=0,
-                dabx=-2, daby=1, sigma_a=0.5,
-                # dabx=0, daby=0, sigma_a=0.5,
-                Tka=0.2, sigma_w=.05, Tkw=0.1,
-                rand=True, t=95 * 60, dT=.1,
-                vel_corr=True, k1=0.097, k2=3305.25)
+    import pandas as pd
+
+    bins = BINS(**params)
+    # df = pd.DataFrame(bins.find_ts(range(10, 200, 10)))
+    # print(df),
+    # print(df[["dtheta"], ["dgamma"], ["dv_ox"], ["dv_o"]].sum)
     bins.plot_errors(plot_theory=False)
     # bins = BINS(psi=90, theta=-3, gamma=2,
     #             dpsi=1, dwbx=-2, dwby=1,
