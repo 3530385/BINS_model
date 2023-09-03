@@ -1,9 +1,9 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import statsmodels.api as sm
-import seaborn as sns
-from tqdm import tqdm
 import scipy
+import seaborn as sns
+import statsmodels.api as sm
+from tqdm import tqdm
 
 sns.set_theme(style="darkgrid")
 
@@ -18,6 +18,9 @@ class BINS:
                  dwbx, dwby, dabx, daby,
                  sigma_a, Tka, sigma_w, Tkw,
                  rand=True, t=60 * 60, dT=.005):
+        self.theta_bo_err = np.deg2rad(0)
+        self.psi_bo_err = np.deg2rad(0)
+        self.gamma_bo_err = np.deg2rad(3)
         self.t = t  # время работы
         self.dT = dT  # шаг интегрирования
         self.N = round(self.t / self.dT)
@@ -63,6 +66,12 @@ class BINS:
         c_bo_align = self.get_mnk(gamma=gamma_align, psi=self.psi + self.deltapsi, theta=theta_align)
         if get_measurement:
             return acc, c_bo_align
+        return c_bo_align
+
+    def alignment(self, ):
+        c_bo_align = self.get_mnk(gamma=self.gamma + self.gamma_bo_err,
+                                  psi=self.psi + self.psi_bo_err,
+                                  theta=self.theta + self.theta_bo_err)
         return c_bo_align
 
     def get_measurement(self, sensor="accel"):
