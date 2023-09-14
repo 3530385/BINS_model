@@ -17,8 +17,10 @@ class BINS:
     def __init__(self, psi, theta, gamma, dpsi,
                  dwbx, dwby, dabx, daby,
                  sigma_a, Tka, sigma_w, Tkw,
-                 rand=True, vel_corr=True, sigma_gnss=0.2,
-                 t=60 * 60, dT=.005, k1=0., k2=0.):
+                 rand=True,
+                 vel_corr=True, psi_corr=True, h_corr=True,
+                 sigma_gnss=0.2,
+                 t=60 * 60, dT=.005, k1=0., k2=0., k3=0., k4=0., k5=0.):
         self.t = t  # время работы
         self.dT = dT  # шаг интегрирования
         self.N = round(self.t / self.dT)
@@ -27,6 +29,7 @@ class BINS:
         self.v = np.array([0, 0, 0])
         self.psi = np.deg2rad(psi)
         self.deltapsi = np.deg2rad(dpsi)
+        self.deltah = 10
         self.theta = np.deg2rad(theta)
         self.gamma = np.deg2rad(gamma)
         self.phi = np.deg2rad(56)
@@ -37,8 +40,13 @@ class BINS:
         self.Tka, self.Tkw = Tka, Tkw
         self.beta_a, self.beta_w = self.Tka ** -1, self.Tkw ** -1
         self.vel_corr = vel_corr
+        self.psi_corr = psi_corr
+        self.h_corr = h_corr
         self.k1 = k1
         self.k2 = k2
+        self.k3 = k3
+        self.k4 = k4
+        self.k5 = k5
         if vel_corr:
             self.sigma_gnss = sigma_gnss
 
@@ -103,15 +111,22 @@ class BINS:
         return result, result.mean(axis=1)
 
     def navigate_algorythm(self):
-        errors = np.zeros((9, self.N))
+        errors = np.zeros((10, self.N))
         a_b, c_bo = self.real_vistavka(get_measurement=True)
         # a_b, _ = self.get_measurement("accel")
         w_b, _ = self.get_measurement("gyro")
         v = self.v.astype(np.float64)
+        psi = np.arctan(c_bo[0, 1] / c_bo[1, 1])
+        if (c_bo[0, 1] > 0 > c_bo[1, 1]) or (c_bo[0, 1] < 0 < c_bo[1, 1]):  # Учёт ошибки при выходе из области
+            psi = psi + np.deg2rad(180)  # определения арктангенса
         phi = self.phi
         lambd = self.lambd
         delta_v = 0
+        delta_psi = 0
+        delta_h = 0
         k1, k2 = self.k1, self.k2
+        h = 0
+        delta_h = 0
         for i in tqdm(range(self.N)):
             if self.vel_corr and not 10 * 60 < i * self.dT < 15 * 60:
                 k1 = self.k1
@@ -119,23 +134,43 @@ class BINS:
             else:
                 k1 = 0
                 k2 = 0
+
+            if self.psi_corr and i > 300/self.dT:
+                k3 = self.k3
+            else:
+                k3 = 0
+
+            if self.h_corr and i > 3/self.dT:
+                k4 = self.k4
+                k5 = self.k5
+            else:
+                k4 = 0
+                k5 = 0
             a_o = c_bo @ a_b[:, i]
             u_o = self.to_cososym(np.array([0, U * np.cos(phi), U * np.sin(phi)]))
-            omega_o = self.to_cososym((1 / R) * np.array([-v[1], v[0], v[0] * np.tan(phi)]))
+            omega_o = self.to_cososym((1 / R + h) * np.array([-v[1], v[0], v[0] * np.tan(phi)]))
             if self.vel_corr:
                 v_gnss = self.get_measurement("gnss")
                 delta_v = v - v_gnss
-            v += self.dT * (a_o + (2 * u_o + omega_o) @ v + np.array([0, 0, -g]) - k1 * delta_v)
+            if self.psi_corr:
+                psi_gsn = self.psi + self.deltapsi
+                delta_psi = psi - psi_gsn
+            if self.h_corr:
+                h_bar = 3
+                delta_h = h - h_bar
+            # print(delta_h)
+            v += self.dT * (a_o + (u_o + omega_o) @ v + np.array([0, 0, -g*(1-2*h/(R+h)+0.0053*np.sin(phi))-k4 * delta_h]) - k5 * delta_v)
+            h += v[2] - k4*delta_h
             # v0_new = v[0] + self.dT * (a_o[0] + (U * np.sin(phi) + U * np.sin(phi) + v[0] * np.tan(phi)) * v[1])# - k1 * delta_v)
             # v1_new = v[1] + self.dT * (a_o[1] - (U * np.sin(phi) + U * np.sin(phi) + v[0] * np.tan(phi)) * v[0])# - k1 * delta_v)
             # v[0], v[1] = v0_new, v1_new
             w_o = self.to_cososym(
-                (1 / R) * np.array([-v[1] * (1 + k2), v[0] * (1 + k2), v[0] * np.tan(phi)
-                                    ])) + u_o  # - k2 / R * delta_v * np.array([-1, 1, 1])) + u_o
+                (1 / (R + h)) * np.array([-v[1] * (1 + k2), v[0] * (1 + k2), v[0] * np.tan(phi)
+                                          ])) + u_o - k3 * delta_psi  # - k2 / (R+h) * delta_v * np.array([-1, 1, 1])) + u_o
             w_b_m = self.to_cososym(w_b[:, i])
             c_bo += self.dT * (w_o @ c_bo - c_bo @ w_b_m)
             # c_bo += self.dT * (c_bo @ w_b_m - w_o @ c_bo)
-            phi += self.dT * v[1] / R
+            phi += self.dT * v[1] / (R + h)
             lambd += self.dT * v[0] / (R * np.cos(phi))
             psi = np.arctan(c_bo[0, 1] / c_bo[1, 1])
             if (c_bo[0, 1] > 0 > c_bo[1, 1]) or (c_bo[0, 1] < 0 < c_bo[1, 1]):  # Учёт ошибки при выходе из области
@@ -147,7 +182,7 @@ class BINS:
                                        np.rad2deg(lambd - self.lambd),
                                        np.rad2deg(phi - self.phi),
                                        np.rad2deg(psi),
-                                       v[0], v[1], v[2]])
+                                       v[0], v[1], v[2], h])
             errors[:, i] = current_errors
         return errors
 
@@ -193,10 +228,12 @@ class BINS:
         #                                                 repeats=self.N, axis=1)                                      #
 
         dv_ox_teor, dv_oy_teor, dtheta_teor, dgamma_teor = self.theory_errors() * magic_podgon_teor + magic_shift_teor
-        dv_ox, dv_oy, dtheta, dgamma = np.array([errors[6],
-                                                 errors[7],
-                                                 errors[2],
-                                                 errors[1]]) * magic_podgon_alg + magic_shift_alg
+        dv_ox, dv_oy, dtheta, dgamma, dv_oz, h = np.array([errors[6],
+                                                           errors[7],
+                                                           errors[2],
+                                                           errors[1],
+                                                           errors[-2],
+                                                           errors[-1]])
         psi = errors[0]
         lambd, phi = errors[3], errors[4]
 
@@ -205,7 +242,8 @@ class BINS:
             plt.plot(t, dv_ox_teor, "b--",
                      t, dv_ox, "b",
                      t, dv_oy_teor, "g--",
-                     t, dv_oy, "g")
+                     t, dv_oy, "g",)
+                     # t, dv_oz)
             plt.legend(["$\Delta V_E $ по формуле", "$\Delta V_E $ в результате работы алгоритма",
                         "$\Delta V_N $ по формуле", "$\Delta V_N $ в результате работы алгоритма"],
                        fontsize='x-small')
@@ -228,7 +266,8 @@ class BINS:
             plt.show()
         else:
             plt.plot(t, dv_ox, "b",
-                     t, dv_oy, "g")
+                     t, dv_oy, "g",)
+                     # t, dv_oz,  "r")
             plt.legend(["$\Delta V_E $ в результате работы алгоритма",
                         "$\Delta V_N $ в результате работы алгоритма"],
                        fontsize='x-small')
@@ -263,6 +302,12 @@ class BINS:
         plt.ylabel("Ошибка, км")
         plt.legend(["$\Delta E $",
                     "$\Delta N $"])
+        plt.show()
+
+        plt.plot(t, h * 10 ** -3,)
+        plt.title("Ошибка определения высоты")
+        plt.xlabel("Время моделирования, мин")
+        plt.ylabel("Ошибка, км")
         plt.show()
 
         if self.vel_corr:
@@ -419,15 +464,18 @@ class BINS:
         return result
 
 
-params = dict(psi=90, theta=-3, gamma=2,
+params = dict(psi=10, theta=-3, gamma=2,
               dpsi=1, dwbx=-2, dwby=1,
               # dpsi=1, dwbx=0, dwby=0,
               dabx=-2, daby=1, sigma_a=0.5,
               # dabx=0, daby=0, sigma_a=0.5,
               Tka=0.2, sigma_w=.05, Tkw=0.1,
-              rand=True, t=90 * 60, dT=.1,
-              vel_corr=True, k1=0.251327412287184,
+              rand=False, t=7 * 60, dT=.1,
+              vel_corr=False, psi_corr=True,
+              h_corr=True,
+              k1=0.251327412287184,
               k2=10266.1975409951,
+              k3=10, k4=0.003, k5=14260000,
               sigma_gnss=0.2)
 
 if __name__ == '__main__':
